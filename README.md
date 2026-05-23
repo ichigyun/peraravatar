@@ -2,6 +2,8 @@
 
 ブラウザだけで動く軽量 PNGTuber（バーチャル顔出し）ツール。マイク音量に反応した口パク・自動瞬き・カスタム表情切替・OBS連携などが全て1ファイルで完結します。
 
+![Peraravatar screenshot](screenshot.png)
+
 ## 🚀 Try it now
 
 セットアップなしでブラウザから直接お試しできます：
