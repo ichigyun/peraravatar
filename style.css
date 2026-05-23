@@ -382,6 +382,24 @@ button.danger { background: rgba(220,80,80,0.25); border-color: rgba(220,80,80,0
   border-color: #f88;
 }
 
+.expression-card .record-btn {
+  padding: 2px 8px;
+  font-size: 11px;
+  margin: 0;
+}
+
+.expression-card .record-btn.recording {
+  background: #d33;
+  color: #fff;
+  border-color: #f55;
+  animation: recordPulse 0.8s ease-in-out infinite;
+}
+
+@keyframes recordPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
 .expression-card .anim-select {
   flex: 1;
   min-width: 0;

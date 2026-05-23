@@ -90,9 +90,9 @@ const DEFAULT_CONFIG = {
   // Each: { id, label, imageKey, hotkey (e.code), animation, volumeMode, volumeThreshold }
   //   volumeMode: 'off' (default) | 'oneshot' | 'hold'
   customExpressions: [
-    { id: 'default_surprise', label: 'びっくり', imageKey: 'examples/sample_surprised.png', hotkey: 'KeyZ', animation: 'recoil', volumeMode: 'oneshot', volumeThreshold: 90 },
-    { id: 'default_smile',    label: '笑い',     imageKey: 'examples/sample_smile.png',     hotkey: 'KeyX', animation: 'bounce', volumeMode: 'off',     volumeThreshold: 60 },
-    { id: 'default_cry',      label: '泣き',     imageKey: 'examples/sample_cry.png',       hotkey: 'KeyC', animation: 'shake',  volumeMode: 'off',     volumeThreshold: 60 },
+    { id: 'default_surprise', label: 'びっくり', imageKey: 'examples/sample_surprised.png', hotkey: 'KeyZ', animation: 'recoil', volumeMode: 'hold', volumeThreshold: 90, volumePatterns: [], volumePatternThreshold: 0.75 },
+    { id: 'default_smile',    label: '笑い',     imageKey: 'examples/sample_smile.png',     hotkey: 'KeyX', animation: 'bounce', volumeMode: 'off',     volumeThreshold: 60, volumePatterns: [], volumePatternThreshold: 0.75 },
+    { id: 'default_cry',      label: '泣き',     imageKey: 'examples/sample_cry.png',       hotkey: 'KeyC', animation: 'shake',  volumeMode: 'off',     volumeThreshold: 60, volumePatterns: [], volumePatternThreshold: 0.75 },
   ],
   threshold1: 5,
   motion: { ...DEFAULT_MOTION },
@@ -232,6 +232,15 @@ function loadConfigFromStorage() {
     }
     if (!Array.isArray(config.customExpressions)) {
       config.customExpressions = cloneDeep(DEFAULT_CONFIG.customExpressions);
+    }
+    // Migrate legacy single-pattern field to plural patterns array.
+    for (const exp of config.customExpressions) {
+      if (!Array.isArray(exp.volumePatterns)) {
+        exp.volumePatterns = (Array.isArray(exp.volumePattern) && exp.volumePattern.length === PATTERN_LENGTH)
+          ? [exp.volumePattern]
+          : [];
+      }
+      delete exp.volumePattern;
     }
   } catch (e) {
     console.warn('Config load failed:', e);
@@ -534,12 +543,12 @@ function buildCustomExpressions() {
     hotkeyRow.appendChild(hotkeyBtn);
     hotkeyRow.appendChild(animSelect);
 
-    // Volume trigger row
-    const volRow = document.createElement('div');
-    volRow.className = 'hotkey-row';
-    const volLabel = document.createElement('span');
-    volLabel.style.cssText = 'font-size:10px;color:#888;flex:0 0 auto;';
-    volLabel.textContent = '音量発火:';
+    // Volume trigger - mode select (own row so the long labels are readable)
+    const volModeRow = document.createElement('div');
+    volModeRow.className = 'hotkey-row';
+    const volModeLabel = document.createElement('span');
+    volModeLabel.style.cssText = 'font-size:10px;color:#888;flex:0 0 auto;';
+    volModeLabel.textContent = '音量発火:';
     const volModeSelect = document.createElement('select');
     volModeSelect.className = 'anim-select';
     volModeSelect.title = '音量がしきい値を超えた時の挙動';
@@ -554,21 +563,113 @@ function buildCustomExpressions() {
       volModeSelect.appendChild(o);
     }
     volModeSelect.value = exp.volumeMode || 'off';
+    volModeRow.appendChild(volModeLabel);
+    volModeRow.appendChild(volModeSelect);
+
+    // Volume trigger - threshold row (slider + number, hidden when mode = off)
+    const volThrRow = document.createElement('div');
+    volThrRow.className = 'hotkey-row';
+    const volThrLabel = document.createElement('span');
+    volThrLabel.style.cssText = 'font-size:10px;color:#888;flex:0 0 auto;';
+    volThrLabel.textContent = '発火音量:';
+    const volThresholdSlider = document.createElement('input');
+    volThresholdSlider.type = 'range';
+    volThresholdSlider.min = '0';
+    volThresholdSlider.max = '100';
+    volThresholdSlider.step = '1';
+    volThresholdSlider.value = exp.volumeThreshold != null ? exp.volumeThreshold : 60;
+    volThresholdSlider.style.flex = '1';
+    volThresholdSlider.style.minWidth = '40px';
     const volThresholdInput = document.createElement('input');
     volThresholdInput.type = 'number';
-    volThresholdInput.className = 'vol-threshold';
+    volThresholdInput.className = 'val';
     volThresholdInput.min = '0';
     volThresholdInput.max = '100';
     volThresholdInput.step = '1';
     volThresholdInput.value = exp.volumeThreshold != null ? exp.volumeThreshold : 60;
     volThresholdInput.title = '音量がこの値を超えると発火';
-    volRow.appendChild(volLabel);
-    volRow.appendChild(volModeSelect);
-    volRow.appendChild(volThresholdInput);
+    volThrRow.appendChild(volThrLabel);
+    volThrRow.appendChild(volThresholdSlider);
+    volThrRow.appendChild(volThresholdInput);
+    volThrRow.style.display = (volModeSelect.value === 'off') ? 'none' : '';
+
+    // Volume pattern row
+    const patternRow = document.createElement('div');
+    patternRow.className = 'hotkey-row';
+    patternRow.style.flexWrap = 'wrap';
+    const patternLabel = document.createElement('span');
+    patternLabel.style.cssText = 'font-size:10px;color:#888;flex:0 0 auto;';
+    patternLabel.textContent = '音声パターン:';
+    const recordBtn = document.createElement('button');
+    recordBtn.className = 'record-btn';
+    recordBtn.textContent = '🎤 録音追加';
+    recordBtn.title = '2.5秒間の音声パターンを記録。複数登録可、どれか一致で発火';
+    const patternStatus = document.createElement('span');
+    patternStatus.className = 'pattern-status';
+    patternStatus.style.cssText = 'font-size:10px;color:#aaa;flex:0 0 auto;';
+    const patternList = document.createElement('span');
+    patternList.className = 'pattern-list';
+    patternList.style.cssText = 'display:flex;flex-wrap:wrap;gap:3px;flex:1;';
+    patternRow.appendChild(patternLabel);
+    patternRow.appendChild(recordBtn);
+    patternRow.appendChild(patternStatus);
+    patternRow.appendChild(patternList);
+
+    function refreshPatternList() {
+      patternList.innerHTML = '';
+      const patterns = Array.isArray(exp.volumePatterns) ? exp.volumePatterns : [];
+      patternStatus.textContent = patterns.length > 0 ? `${patterns.length}個` : '未記録';
+      for (let pi = 0; pi < patterns.length; pi++) {
+        const del = document.createElement('button');
+        del.className = 'danger';
+        del.textContent = `#${pi + 1} ×`;
+        del.title = `パターン ${pi + 1} を削除`;
+        del.style.cssText = 'padding:1px 5px;font-size:10px;margin:0;';
+        const idx = pi;
+        del.addEventListener('click', () => {
+          exp.volumePatterns.splice(idx, 1);
+          delete patternCooldowns[exp.id];
+          saveConfig();
+          refreshPatternList();
+          sensRow.style.display = exp.volumePatterns.length > 0 ? '' : 'none';
+        });
+        patternList.appendChild(del);
+      }
+    }
+    refreshPatternList();
+
+    // Sensitivity row (only show when at least one pattern is recorded)
+    const sensRow = document.createElement('div');
+    sensRow.className = 'hotkey-row';
+    sensRow.style.display = (Array.isArray(exp.volumePatterns) && exp.volumePatterns.length > 0) ? '' : 'none';
+    const sensLabel = document.createElement('span');
+    sensLabel.style.cssText = 'font-size:10px;color:#888;flex:0 0 auto;';
+    sensLabel.textContent = '感度:';
+    const sensSlider = document.createElement('input');
+    sensSlider.type = 'range';
+    sensSlider.min = '0.3';
+    sensSlider.max = '0.95';
+    sensSlider.step = '0.05';
+    sensSlider.value = (exp.volumePatternThreshold != null) ? exp.volumePatternThreshold : 0.75;
+    sensSlider.style.flex = '1';
+    sensSlider.style.minWidth = '40px';
+    const sensInput = document.createElement('input');
+    sensInput.type = 'number';
+    sensInput.className = 'val';
+    sensInput.min = '0.3';
+    sensInput.max = '0.95';
+    sensInput.step = '0.05';
+    sensInput.value = (+sensSlider.value).toFixed(2);
+    sensRow.appendChild(sensLabel);
+    sensRow.appendChild(sensSlider);
+    sensRow.appendChild(sensInput);
 
     body.appendChild(labelInput);
     body.appendChild(hotkeyRow);
-    body.appendChild(volRow);
+    body.appendChild(volModeRow);
+    body.appendChild(volThrRow);
+    body.appendChild(patternRow);
+    body.appendChild(sensRow);
 
     const removeBtn = document.createElement('button');
     removeBtn.className = 'remove-exp danger';
@@ -614,14 +715,45 @@ function buildCustomExpressions() {
 
     volModeSelect.addEventListener('change', () => {
       exp.volumeMode = volModeSelect.value;
+      volThrRow.style.display = (volModeSelect.value === 'off') ? 'none' : '';
       saveConfig();
     });
 
+    volThresholdSlider.addEventListener('input', () => {
+      const v = +volThresholdSlider.value;
+      exp.volumeThreshold = v;
+      volThresholdInput.value = v;
+      saveConfig();
+    });
     volThresholdInput.addEventListener('input', () => {
       let v = +volThresholdInput.value;
       if (Number.isNaN(v)) return;
       v = Math.max(0, Math.min(100, v));
       exp.volumeThreshold = v;
+      volThresholdSlider.value = v;
+      saveConfig();
+    });
+
+    recordBtn.addEventListener('click', async () => {
+      const result = await recordVolumePattern(exp, recordBtn);
+      if (result) {
+        refreshPatternList();
+        sensRow.style.display = '';
+      }
+    });
+
+    sensSlider.addEventListener('input', () => {
+      const v = +sensSlider.value;
+      exp.volumePatternThreshold = v;
+      sensInput.value = v.toFixed(2);
+      saveConfig();
+    });
+    sensInput.addEventListener('input', () => {
+      let v = +sensInput.value;
+      if (Number.isNaN(v)) return;
+      v = Math.max(0.3, Math.min(0.95, v));
+      exp.volumePatternThreshold = v;
+      sensSlider.value = v;
       saveConfig();
     });
 
@@ -657,10 +789,39 @@ addCustomExpressionBtn.addEventListener('click', () => {
     animation: 'none',
     volumeMode: 'off',
     volumeThreshold: 60,
+    volumePatterns: [],
+    volumePatternThreshold: 0.75,
   });
   buildCustomExpressions();
   saveConfig();
 });
+
+async function recordVolumePattern(exp, btn) {
+  if (!micStarted) {
+    alert('先にマイク許可ボタンを押してください');
+    return null;
+  }
+  btn.disabled = true;
+  const origLabel = btn.textContent;
+  for (let i = 3; i > 0; i--) {
+    btn.textContent = `${i}…`;
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  btn.textContent = '🔴 録音中';
+  btn.classList.add('recording');
+  const samples = new Array(PATTERN_LENGTH);
+  for (let i = 0; i < PATTERN_LENGTH; i++) {
+    samples[i] = currentVolume;
+    await new Promise(r => setTimeout(r, PATTERN_SAMPLE_MS));
+  }
+  if (!Array.isArray(exp.volumePatterns)) exp.volumePatterns = [];
+  exp.volumePatterns.push(samples);
+  saveConfig();
+  btn.classList.remove('recording');
+  btn.disabled = false;
+  btn.textContent = origLabel;
+  return samples;
+}
 
 function cancelKeyCapture() {
   if (keyCaptureButton) {
@@ -1017,6 +1178,22 @@ const volumeOneshotStates = {};        // expressionId -> { until, cooldownUntil
 const ONESHOT_HOLD_MS = 1000;
 const ONESHOT_COOLDOWN_MS = 400;
 
+// Volume pattern matching constants
+const PATTERN_LENGTH = 50;             // 50 samples
+const PATTERN_SAMPLE_MS = 50;          // sample every 50ms -> 2.5 second window
+const PATTERN_CHECK_MS = 100;          // check correlations every 100ms
+const PATTERN_FIRE_DURATION_MS = 1000; // hold expression for 1s after match
+const PATTERN_COOLDOWN_MS = 2500;      // cooldown after a match (suppress re-fire)
+const PATTERN_SHIFT_TOLERANCE = 6;     // ±300ms time-shift slack for matching
+
+const volumeBuffer = new Array(PATTERN_LENGTH).fill(0);
+let volumeBufferWriteIdx = 0;
+let lastBufferSampleTime = 0;
+let lastPatternCheckTime = 0;
+const patternCooldowns = Object.create(null);
+let patternFiredExpressionId = null;
+let patternFireUntil = 0;
+
 
 function scheduleBlink() {
   const m = config.motion;
@@ -1078,13 +1255,155 @@ function setActiveExpression(id, now) {
   }
 }
 
+// Pearson correlation between two equal-length arrays. Returns -1..1.
+function correlation(a, b) {
+  const n = a.length;
+  if (n === 0 || n !== b.length) return 0;
+  let sumA = 0, sumB = 0;
+  for (let i = 0; i < n; i++) { sumA += a[i]; sumB += b[i]; }
+  const meanA = sumA / n, meanB = sumB / n;
+  let num = 0, denA = 0, denB = 0;
+  for (let i = 0; i < n; i++) {
+    const da = a[i] - meanA;
+    const db = b[i] - meanB;
+    num += da * db;
+    denA += da * da;
+    denB += db * db;
+  }
+  const den = Math.sqrt(denA * denB);
+  return den > 0 ? num / den : 0;
+}
+
+// Cross-correlation: try several time shifts of the pattern against the live
+// buffer, return the highest correlation. Robust to slight timing differences
+// (e.g. laughing slightly faster/slower than the recorded sample).
+function maxShiftedCorrelation(live, pattern) {
+  const n = live.length;
+  if (n !== pattern.length) return correlation(live, pattern);
+  let best = -1;
+  for (let shift = -PATTERN_SHIFT_TOLERANCE; shift <= PATTERN_SHIFT_TOLERANCE; shift++) {
+    const a = [], b = [];
+    for (let i = 0; i < n; i++) {
+      const j = i + shift;
+      if (j < 0 || j >= n) continue;
+      a.push(live[i]);
+      b.push(pattern[j]);
+    }
+    if (a.length < n - PATTERN_SHIFT_TOLERANCE * 2) continue;
+    const c = correlation(a, b);
+    if (c > best) best = c;
+  }
+  return best;
+}
+
+// Count significant local maxima. Used to discriminate between rapidly
+// oscillating patterns (laughter) and slowly varying ones (cry / sustained
+// vowels). Threshold scales with the pattern's own standard deviation.
+function countLocalPeaks(arr) {
+  const n = arr.length;
+  if (n < 3) return 0;
+  let sum = 0;
+  for (let i = 0; i < n; i++) sum += arr[i];
+  const mean = sum / n;
+  let varSum = 0;
+  for (let i = 0; i < n; i++) varSum += (arr[i] - mean) * (arr[i] - mean);
+  const std = Math.sqrt(varSum / n);
+  const minProm = Math.max(1, std * 0.5);
+  let count = 0;
+  for (let i = 1; i < n - 1; i++) {
+    if (arr[i] > arr[i - 1] && arr[i] > arr[i + 1]) {
+      const localMin = Math.min(arr[i - 1], arr[i + 1]);
+      if (arr[i] - localMin >= minProm) count++;
+    }
+  }
+  return count;
+}
+
+function snapshotOrderedBuffer() {
+  const out = new Array(PATTERN_LENGTH);
+  for (let i = 0; i < PATTERN_LENGTH; i++) {
+    out[i] = volumeBuffer[(volumeBufferWriteIdx + i) % PATTERN_LENGTH];
+  }
+  return out;
+}
+
+function checkVolumePatterns(now) {
+  if (now < patternFireUntil) return; // an expression is currently firing
+  const live = snapshotOrderedBuffer();
+  // Skip if the buffer is mostly silent (avoids matching the silent baseline)
+  let sum = 0;
+  for (let i = 0; i < live.length; i++) sum += live[i];
+  if (sum / live.length < 3) return;
+  // Need some variance, otherwise correlation is meaningless
+  let variance = 0;
+  const mean = sum / live.length;
+  for (let i = 0; i < live.length; i++) variance += (live[i] - mean) * (live[i] - mean);
+  if (variance / live.length < 4) return;
+
+  const livePeaks = countLocalPeaks(live);
+  let winnerId = null;
+  let bestCorr = -1;
+  let topCorr = -1;
+  let topLabel = '';
+  let topPeakDiff = 0;
+  let topPatIdx = -1;
+  for (const exp of config.customExpressions) {
+    const patterns = Array.isArray(exp.volumePatterns) ? exp.volumePatterns : [];
+    if (patterns.length === 0) continue;
+    if (!urlOf(exp.imageKey)) continue;
+
+    // Find this expression's best-matching pattern
+    let expBestCorr = -1;
+    let expBestPeakDiff = 0;
+    let expBestPeakAllow = 2;
+    let expBestPatIdx = -1;
+    for (let pi = 0; pi < patterns.length; pi++) {
+      const pat = patterns[pi];
+      if (!Array.isArray(pat) || pat.length !== PATTERN_LENGTH) continue;
+      const corr = maxShiftedCorrelation(live, pat);
+      if (corr > expBestCorr) {
+        const patPeaks = countLocalPeaks(pat);
+        expBestCorr = corr;
+        expBestPeakDiff = Math.abs(livePeaks - patPeaks);
+        expBestPeakAllow = Math.max(2, Math.ceil(patPeaks * 0.3));
+        expBestPatIdx = pi;
+      }
+    }
+
+    if (expBestCorr > topCorr) {
+      topCorr = expBestCorr;
+      topLabel = exp.label || exp.id;
+      topPeakDiff = expBestPeakDiff;
+      topPatIdx = expBestPatIdx;
+    }
+
+    if (now < (patternCooldowns[exp.id] || 0)) continue;
+    const thr = (typeof exp.volumePatternThreshold === 'number') ? exp.volumePatternThreshold : 0.75;
+    const peakOK = expBestPeakDiff <= expBestPeakAllow;
+    if (expBestCorr >= thr && peakOK && expBestCorr > bestCorr) {
+      bestCorr = expBestCorr;
+      winnerId = exp.id;
+    }
+  }
+  if (topCorr > -0.5 && topLabel) {
+    setDebug(`pat: ${topLabel}#${topPatIdx + 1}=${topCorr.toFixed(2)} peak±${topPeakDiff}` +
+             (winnerId ? ' [FIRED]' : ''));
+  }
+  if (winnerId) {
+    patternFiredExpressionId = winnerId;
+    patternFireUntil = now + PATTERN_FIRE_DURATION_MS;
+    patternCooldowns[winnerId] = patternFireUntil + PATTERN_COOLDOWN_MS;
+  }
+}
+
 function scheduleYosomi() {
   const m = config.motion;
   const next = m.yosomiIntervalMin + Math.random() * Math.max(100, m.yosomiIntervalMax - m.yosomiIntervalMin);
   setTimeout(() => {
     const now = performance.now();
     const silentDur = now - lastTalkTime;
-    if (silentDur > m.idleLookDelay && silentDur < m.fullAsleepAfter &&
+    // Suppress yosomi once we enter the sleepy state (sleepyAfter).
+    if (silentDur > m.idleLookDelay && silentDur < m.sleepyAfter &&
         !activeCustomExpressionId && !forcedExpressionId) {
       triggerYosomi();
     }
@@ -1246,13 +1565,26 @@ async function startMic() {
         }
       }
 
-      // Priority: URL-forced > keyboard > volume > none
+      // Volume pattern detection: rolling buffer + periodic correlation check
+      if (now - lastBufferSampleTime >= PATTERN_SAMPLE_MS) {
+        volumeBuffer[volumeBufferWriteIdx] = currentVolume;
+        volumeBufferWriteIdx = (volumeBufferWriteIdx + 1) % PATTERN_LENGTH;
+        lastBufferSampleTime = now;
+      }
+      if (now - lastPatternCheckTime >= PATTERN_CHECK_MS) {
+        lastPatternCheckTime = now;
+        checkVolumePatterns(now);
+      }
+
+      // Priority: URL-forced > keyboard > volume > pattern > none
       if (forcedExpressionId) {
         setActiveExpression(forcedExpressionId, now);
       } else if (keyboardHeldExpressionId) {
         setActiveExpression(keyboardHeldExpressionId, now);
       } else if (volumeWinnerId) {
         setActiveExpression(volumeWinnerId, now);
+      } else if (patternFiredExpressionId && now < patternFireUntil) {
+        setActiveExpression(patternFiredExpressionId, now);
       } else {
         setActiveExpression(null, now);
       }
@@ -1428,9 +1760,9 @@ function render(now) {
   }
   tiltCurrent += (tiltTarget - tiltCurrent) * m.talkTiltLerp;
 
-  // Idle look: suppressed during expression active, talking, or fully asleep
+  // Idle look: suppressed during expression active, talking, or once in sleepy state
   let idleLookX = 0;
-  if (!isExpressionActive && !isTalking && silentDur > m.idleLookDelay && silentDur < m.fullAsleepAfter) {
+  if (!isExpressionActive && !isTalking && silentDur > m.idleLookDelay && silentDur < m.sleepyAfter) {
     const fadeIn = Math.min(1, (silentDur - m.idleLookDelay) / m.idleLookFadeIn);
     idleLookX = Math.sin((now / m.idleLookPeriod) * Math.PI * 2) * m.idleLookAmpX * fadeIn;
   }
