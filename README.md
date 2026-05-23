@@ -250,7 +250,7 @@ OBS Studio で「ブラウザソース」を追加：
 - **OBS ブラウザソース**: 起動フラグ `--use-fake-ui-for-media-stream` 必須
 - **Chrome/Edge 通常ブラウザ**: アドレスバー左の鍵アイコン → マイク許可
 - **debug 欄に `NotAllowedError`**: 上記いずれかで対処
-- **debug 欄に `protocol=file:`**: `file://` で開いてる → サーバー経由（http://localhost）で開き直す
+- **debug 欄に `protocol=file:`**: `file://` で開いてる → サーバー経由（`http://localhost`）で開き直す
 
 ### IndexedDB 容量超過エラー
 
@@ -278,4 +278,4 @@ debug 欄に「ストレージ容量超過」と出た場合：
 
 ## ライセンス
 
-MIT License。改造・再配布自由。
+MIT License
