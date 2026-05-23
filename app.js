@@ -35,52 +35,75 @@ const DEFAULT_MOTION = {
   idleLookDelay: 5000,
   idleLookFadeIn: 1500,
   loudPulseMin: 30,
-  loudPulseDelta: 20,
-  loudPulseScale: 0.035,
+  loudPulseScale: 0.005,
   loudPulseDur: 260,
   loudPulseRearm: 0.5,
   sleepyAfter: 30000,
   sleepyBreathMul: 0.5,
+  fullAsleepAfter: 90000, // total silence ms until eyes stay closed permanently
   yosomiIntervalMin: 7000,
   yosomiIntervalMax: 15000,
   yosomiDuration: 1500,
   yosomiTiltDeg: 3,
+  // Custom-expression animation parameters
+  recoilFactor: 0.35,
+  shakeAmp: 3.5,
+  bounceAmp: 6,
+  bounceSpeed: 180,    // ms divisor for sin (smaller = faster)
+  wobbleAmp: 9,
+  wobbleSpeed: 350,
+  wobbleRot: 3,
+  nodAmp: 5,
+  nodSpeed: 230,
+  nodRot: 1,
+  headshakeAmp: 7,
+  headshakeSpeed: 110,
+  headshakeRot: 3,
 };
 
 const FIXED_SLOTS = [
   { key: 'normal',      label: '通常' },
   { key: 'close',       label: '瞬き(閉眼)' },
-  { key: 'surprised',   label: '驚き' },
   { key: 'yosomi_left', label: 'よそ見(左)' },
   { key: 'yosomi_right',label: 'よそ見(右)' },
 ];
 
-// In the config, every image slot stores an "image key" (string) which refers
-// to an entry in IndexedDB. The actual dataURL is loaded into `imageCache`
-// at startup and consulted at render time.
+// In the config, every image reference is a string that can be either:
+//   - an IndexedDB key like "img_xxx" (user-uploaded images)
+//   - a relative path like "examples/sample_normal.png" (bundled defaults)
+//   - null (unset)
+// `urlOf(ref)` resolves either form to a URL usable as an <img src>.
 const DEFAULT_CONFIG = {
   images: {
-    normal: null,
-    close: null,
-    surprised: null,
-    yosomi_left: null,
-    yosomi_right: null,
+    normal:       'examples/sample_normal.png',
+    close:        'examples/sample_close.png',
+    yosomi_left:  'examples/sample_left.png',
+    yosomi_right: 'examples/sample_right.png',
   },
   mouthTiers: [
-    { threshold: 5,   images: [] },
-    { threshold: 7.5, images: [] },
-    { threshold: 10,  images: [] },
+    { threshold: 5,  images: ['examples/sample_mouth_o.png'] },
+    { threshold: 18, images: ['examples/sample_mouth_i.png'] },
+    { threshold: 25, images: ['examples/sample_mouth_a.png'] },
+  ],
+  // User-defined expressions triggered by hotkeys or volume.
+  // Held while the key is down. Optionally fires when volume exceeds threshold.
+  // Each: { id, label, imageKey, hotkey (e.code), animation, volumeMode, volumeThreshold }
+  //   volumeMode: 'off' (default) | 'oneshot' | 'hold'
+  customExpressions: [
+    { id: 'default_surprise', label: 'びっくり', imageKey: 'examples/sample_surprised.png', hotkey: 'KeyZ', animation: 'recoil', volumeMode: 'oneshot', volumeThreshold: 90 },
+    { id: 'default_smile',    label: '笑い',     imageKey: 'examples/sample_smile.png',     hotkey: 'KeyX', animation: 'bounce', volumeMode: 'off',     volumeThreshold: 60 },
+    { id: 'default_cry',      label: '泣き',     imageKey: 'examples/sample_cry.png',       hotkey: 'KeyC', animation: 'shake',  volumeMode: 'off',     volumeThreshold: 60 },
   ],
   threshold1: 5,
-  threshold2: 10,
-  threshold3: 60,
-  surpriseMode: 'oneshot',
-  surpriseStyle: 'hop',
   motion: { ...DEFAULT_MOTION },
   blinkMin: 2000,
   blinkMax: 5000,
   blinkDuration: 150,
   obsMode: false,
+  // Background for verifying image transparency.
+  // mode: 'transparent' | 'checker' | 'color'
+  backgroundMode: 'transparent',
+  backgroundColor: '#88c0d0',
 };
 
 // ============================================================
@@ -207,6 +230,9 @@ function loadConfigFromStorage() {
     if (!Array.isArray(config.mouthTiers) || config.mouthTiers.length === 0) {
       config.mouthTiers = cloneDeep(DEFAULT_CONFIG.mouthTiers);
     }
+    if (!Array.isArray(config.customExpressions)) {
+      config.customExpressions = cloneDeep(DEFAULT_CONFIG.customExpressions);
+    }
   } catch (e) {
     console.warn('Config load failed:', e);
   }
@@ -262,6 +288,8 @@ const panelToggle     = document.getElementById('panel-toggle');
 const fixedSlotsDiv   = document.getElementById('fixed-slots');
 const mouthTiersDiv   = document.getElementById('mouth-tiers');
 const addMouthTierBtn = document.getElementById('addMouthTier');
+const customExpressionsDiv = document.getElementById('custom-expressions');
+const addCustomExpressionBtn = document.getElementById('addCustomExpression');
 const volText         = document.getElementById('volText');
 const volBar          = document.getElementById('volBar');
 const debugDiv        = document.getElementById('debug');
@@ -276,8 +304,37 @@ function setDebug(msg, isError) {
 // URL params
 // ============================================================
 const URL_PARAMS = new URLSearchParams(location.search);
-const FORCE_SURPRISED = URL_PARAMS.get('surprised') === '1';
+// ?custom=<hotkey hint> e.g. ?custom=z forces the expression bound to Z
+// (or by label/id if no key match). Computed lazily after config loads.
+const FORCE_CUSTOM_HINT = URL_PARAMS.get('custom');
 const FORCE_HIDE_PANEL = URL_PARAMS.get('panel') === '0';
+let forcedExpressionId = null; // populated in init() once customExpressions known
+
+function hotkeyHintToCode(hint) {
+  if (!hint) return null;
+  const s = String(hint).trim().toLowerCase();
+  if (!s) return null;
+  if (s === 'space') return 'Space';
+  if (s === 'escape' || s === 'esc') return 'Escape';
+  if (/^[a-z]$/.test(s)) return 'Key' + s.toUpperCase();
+  if (/^[0-9]$/.test(s)) return 'Digit' + s;
+  return s; // pass through unchanged for advanced users (e.g. 'F1')
+}
+
+function resolveForcedExpression(hint) {
+  if (!hint) return null;
+  const code = hotkeyHintToCode(hint);
+  // Try matching by hotkey code first
+  let exp = config.customExpressions.find(e => e.hotkey === code);
+  if (exp) return exp;
+  // Fallback: by id
+  exp = config.customExpressions.find(e => e.id === hint);
+  if (exp) return exp;
+  // Fallback: by label (case-insensitive)
+  const lower = String(hint).toLowerCase();
+  exp = config.customExpressions.find(e => (e.label || '').toLowerCase() === lower);
+  return exp || null;
+}
 
 // ============================================================
 // File picker → dataURL
@@ -301,18 +358,34 @@ function pickImageFile() {
 
 async function storeNewImage(dataURL) {
   const key = newImageKey();
-  await idbSet(key, dataURL);
+  try {
+    await idbSet(key, dataURL);
+  } catch (e) {
+    const msg = (e && e.message) || String(e);
+    const isQuota = e && (e.name === 'QuotaExceededError' ||
+                         /quota|storage/i.test(msg));
+    if (isQuota) {
+      const friendly = 'ブラウザのストレージ容量を超えました。\n' +
+        '・既存の画像をいくつか削除する\n' +
+        '・「設定」タブの「JSONで書き出し」でバックアップ→「デフォルトに戻す」でリセット\n' +
+        '・登録する画像のファイルサイズを小さくする (PNGを縮小・JPEG化など)\n' +
+        'のいずれかをお試しください。';
+      setDebug('ストレージ容量超過: ' + msg, true);
+      alert(friendly);
+    } else {
+      setDebug('画像保存失敗: ' + msg, true);
+      alert('画像の保存に失敗しました: ' + msg);
+    }
+    throw e;
+  }
   imageCache[key] = dataURL;
   return key;
 }
 
 async function removeImageByKey(key) {
-  if (!key) return;
-  try {
-    await idbDelete(key);
-  } catch (e) {
-    // ignore
-  }
+  if (!key || typeof key !== 'string') return;
+  if (!key.startsWith('img_')) return; // path-based reference, nothing to delete in IDB
+  try { await idbDelete(key); } catch (e) { /* ignore */ }
   delete imageCache[key];
 }
 
@@ -343,10 +416,9 @@ function buildFixedSlots() {
     fixedSlotsDiv.appendChild(row);
 
     const refreshThumb = () => {
-      const key = config.images[slot.key];
-      const dataURL = key && imageCache[key];
-      if (dataURL) {
-        thumb.style.backgroundImage = `url(${dataURL})`;
+      const url = urlOf(config.images[slot.key]);
+      if (url) {
+        thumb.style.backgroundImage = `url(${url})`;
         thumb.classList.remove('empty');
         labelArea.querySelector('.filename').textContent = '設定済み';
       } else {
@@ -380,6 +452,227 @@ function buildFixedSlots() {
 }
 
 // ============================================================
+// UI: Custom expressions
+// ============================================================
+function newExpressionId() {
+  return 'exp_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+}
+
+function keyCodeLabel(code) {
+  if (!code) return '(未設定)';
+  if (code.startsWith('Key')) return code.slice(3);
+  if (code.startsWith('Digit')) return code.slice(5);
+  if (code.startsWith('Numpad')) return 'N' + code.slice(6);
+  return code;
+}
+
+const RESERVED_KEYS_FOR_CUSTOM = new Set(['KeyH', 'KeyY']);
+
+const ANIMATION_OPTIONS = [
+  { value: 'none',      label: '動かない' },
+  { value: 'hop',       label: 'ホップ（上に跳ねる）' },
+  { value: 'recoil',    label: 'リコイル（後ろに引く）' },
+  { value: 'shake',     label: '震える（細かく揺れる）' },
+  { value: 'bounce',    label: 'バウンス（軽く上下に弾む）' },
+  { value: 'wobble',    label: 'ゆらゆら（左右に揺れる）' },
+  { value: 'nod',       label: 'うなずく（縦に振る）' },
+  { value: 'headshake', label: '首を振る（横に振る）' },
+];
+// Preferred default hotkey order for newly added custom expressions
+const AUTO_HOTKEY_CANDIDATES = [
+  'KeyZ','KeyX','KeyC','KeyV','KeyB','KeyN','KeyM',
+  'KeyA','KeyS','KeyD','KeyF','KeyG',
+  'Digit1','Digit2','Digit3','Digit4','Digit5','Digit6','Digit7','Digit8','Digit9','Digit0',
+];
+
+function nextAvailableHotkey() {
+  const used = new Set(config.customExpressions.map(e => e.hotkey).filter(Boolean));
+  used.add('KeyH'); used.add('KeyY');
+  for (const k of AUTO_HOTKEY_CANDIDATES) {
+    if (!used.has(k)) return k;
+  }
+  return null;
+}
+
+let keyCaptureTarget = null; // expression id currently in hotkey-capture mode
+let keyCaptureButton = null;
+
+function buildCustomExpressions() {
+  customExpressionsDiv.innerHTML = '';
+  for (let i = 0; i < config.customExpressions.length; i++) {
+    const exp = config.customExpressions[i];
+    const card = document.createElement('div');
+    card.className = 'expression-card';
+
+    const thumb = document.createElement('div');
+    thumb.className = 'thumb';
+
+    const body = document.createElement('div');
+    body.className = 'body';
+
+    const labelInput = document.createElement('input');
+    labelInput.type = 'text';
+    labelInput.className = 'exp-label';
+    labelInput.placeholder = '名前（例: 笑い）';
+    labelInput.value = exp.label || '';
+
+    const hotkeyRow = document.createElement('div');
+    hotkeyRow.className = 'hotkey-row';
+    const hotkeyBtn = document.createElement('button');
+    hotkeyBtn.className = 'hotkey-btn';
+    hotkeyBtn.textContent = keyCodeLabel(exp.hotkey);
+    hotkeyBtn.title = 'クリックしてキーを割り当て（押している間だけ表示）';
+    const animSelect = document.createElement('select');
+    animSelect.className = 'anim-select';
+    for (const opt of ANIMATION_OPTIONS) {
+      const o = document.createElement('option');
+      o.value = opt.value;
+      o.textContent = opt.label;
+      animSelect.appendChild(o);
+    }
+    animSelect.value = exp.animation || 'none';
+    hotkeyRow.appendChild(hotkeyBtn);
+    hotkeyRow.appendChild(animSelect);
+
+    // Volume trigger row
+    const volRow = document.createElement('div');
+    volRow.className = 'hotkey-row';
+    const volLabel = document.createElement('span');
+    volLabel.style.cssText = 'font-size:10px;color:#888;flex:0 0 auto;';
+    volLabel.textContent = '音量発火:';
+    const volModeSelect = document.createElement('select');
+    volModeSelect.className = 'anim-select';
+    volModeSelect.title = '音量がしきい値を超えた時の挙動';
+    for (const [v, lbl] of [
+      ['off', '発火しない'],
+      ['oneshot', '超えた瞬間に一度だけ（1秒）'],
+      ['hold', '超えてる間ずっと'],
+    ]) {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = lbl;
+      volModeSelect.appendChild(o);
+    }
+    volModeSelect.value = exp.volumeMode || 'off';
+    const volThresholdInput = document.createElement('input');
+    volThresholdInput.type = 'number';
+    volThresholdInput.className = 'vol-threshold';
+    volThresholdInput.min = '0';
+    volThresholdInput.max = '100';
+    volThresholdInput.step = '1';
+    volThresholdInput.value = exp.volumeThreshold != null ? exp.volumeThreshold : 60;
+    volThresholdInput.title = '音量がこの値を超えると発火';
+    volRow.appendChild(volLabel);
+    volRow.appendChild(volModeSelect);
+    volRow.appendChild(volThresholdInput);
+
+    body.appendChild(labelInput);
+    body.appendChild(hotkeyRow);
+    body.appendChild(volRow);
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'remove-exp danger';
+    removeBtn.textContent = '削除';
+
+    card.appendChild(thumb);
+    card.appendChild(body);
+    card.appendChild(removeBtn);
+    customExpressionsDiv.appendChild(card);
+
+    const refreshThumb = () => {
+      const url = urlOf(exp.imageKey);
+      if (url) {
+        thumb.style.backgroundImage = `url(${url})`;
+        thumb.classList.remove('empty');
+      } else {
+        thumb.style.backgroundImage = '';
+        thumb.classList.add('empty');
+      }
+    };
+    refreshThumb();
+
+    thumb.addEventListener('click', async () => {
+      const result = await pickImageFile();
+      if (!result) return;
+      const oldKey = exp.imageKey;
+      const newKey = await storeNewImage(result.dataURL);
+      exp.imageKey = newKey;
+      await removeImageByKey(oldKey);
+      refreshThumb();
+      saveConfig();
+    });
+
+    labelInput.addEventListener('input', () => {
+      exp.label = labelInput.value;
+      saveConfig();
+    });
+
+    animSelect.addEventListener('change', () => {
+      exp.animation = animSelect.value;
+      saveConfig();
+    });
+
+    volModeSelect.addEventListener('change', () => {
+      exp.volumeMode = volModeSelect.value;
+      saveConfig();
+    });
+
+    volThresholdInput.addEventListener('input', () => {
+      let v = +volThresholdInput.value;
+      if (Number.isNaN(v)) return;
+      v = Math.max(0, Math.min(100, v));
+      exp.volumeThreshold = v;
+      saveConfig();
+    });
+
+    hotkeyBtn.addEventListener('click', () => {
+      if (keyCaptureButton) {
+        keyCaptureButton.classList.remove('capturing');
+        keyCaptureButton.textContent = keyCodeLabel(
+          (config.customExpressions.find(e => e.id === keyCaptureTarget) || {}).hotkey
+        );
+      }
+      keyCaptureTarget = exp.id;
+      keyCaptureButton = hotkeyBtn;
+      hotkeyBtn.classList.add('capturing');
+      hotkeyBtn.textContent = '...';
+    });
+
+    removeBtn.addEventListener('click', async () => {
+      if (exp.imageKey) await removeImageByKey(exp.imageKey);
+      delete volumeOneshotStates[exp.id];
+      config.customExpressions.splice(i, 1);
+      buildCustomExpressions();
+      saveConfig();
+    });
+  }
+}
+
+addCustomExpressionBtn.addEventListener('click', () => {
+  config.customExpressions.push({
+    id: newExpressionId(),
+    label: '',
+    imageKey: null,
+    hotkey: nextAvailableHotkey(),
+    animation: 'none',
+    volumeMode: 'off',
+    volumeThreshold: 60,
+  });
+  buildCustomExpressions();
+  saveConfig();
+});
+
+function cancelKeyCapture() {
+  if (keyCaptureButton) {
+    const exp = config.customExpressions.find(e => e.id === keyCaptureTarget);
+    keyCaptureButton.classList.remove('capturing');
+    keyCaptureButton.textContent = keyCodeLabel(exp ? exp.hotkey : null);
+  }
+  keyCaptureTarget = null;
+  keyCaptureButton = null;
+}
+
+// ============================================================
 // UI: Mouth tiers (variable count)
 // ============================================================
 function sortMouthTiers() {
@@ -394,12 +687,15 @@ function buildMouthTiers() {
     const card = document.createElement('div');
     card.className = 'mouth-tier';
 
+    // Coerce to number to prevent any HTML injection via imported config.
+    const safeThr = Number(tier.threshold);
+    const thrVal = Number.isFinite(safeThr) ? safeThr : 0;
     const header = document.createElement('div');
     header.className = 'mouth-tier-header';
     header.innerHTML =
       `<label>音量 ≥</label>` +
-      `<input type="range" min="0" max="100" step="0.5" value="${tier.threshold}">` +
-      `<span class="val">${tier.threshold}</span>` +
+      `<input type="range" min="0" max="100" step="0.5" value="${thrVal}">` +
+      `<input type="number" class="val" min="0" max="100" step="0.5" value="${thrVal}">` +
       `<button class="remove-tier danger">削除</button>`;
     card.appendChild(header);
 
@@ -412,10 +708,10 @@ function buildMouthTiers() {
       imagesDiv.innerHTML = '';
       for (let j = 0; j < tier.images.length; j++) {
         const key = tier.images[j];
-        const dataURL = imageCache[key];
+        const url = urlOf(key);
         const t = document.createElement('div');
         t.className = 'img-thumb';
-        if (dataURL) t.style.backgroundImage = `url(${dataURL})`;
+        if (url) t.style.backgroundImage = `url(${url})`;
         const x = document.createElement('div');
         x.className = 'remove';
         x.textContent = '×';
@@ -457,13 +753,22 @@ function buildMouthTiers() {
     refreshImages();
 
     const slider = header.querySelector('input[type=range]');
-    const valSpan = header.querySelector('.val');
+    const valInput = header.querySelector('input[type=number].val');
     slider.addEventListener('input', () => {
       tier.threshold = +slider.value;
-      valSpan.textContent = tier.threshold;
+      valInput.value = tier.threshold;
       saveConfig();
     });
     slider.addEventListener('change', () => { buildMouthTiers(); });
+    valInput.addEventListener('input', () => {
+      let v = +valInput.value;
+      if (Number.isNaN(v)) return;
+      v = Math.max(0, Math.min(100, v));
+      tier.threshold = v;
+      slider.value = v;
+      saveConfig();
+    });
+    valInput.addEventListener('change', () => { buildMouthTiers(); });
 
     header.querySelector('.remove-tier').addEventListener('click', async () => {
       if (config.mouthTiers.length <= 1) { alert('最低1つの口パク段階は必要です'); return; }
@@ -499,20 +804,46 @@ document.querySelectorAll('#panel-tabs .tab').forEach(btn => {
 // ============================================================
 // UI: bind controls
 // ============================================================
+// Helpers for the optional value display element which may be either a
+// <span> (read-only) or an <input type="number"> (editable).
+function setValDisplay(valEl, text, numericValue) {
+  if (!valEl) return;
+  if (valEl.tagName === 'INPUT') valEl.value = numericValue;
+  else valEl.textContent = text;
+}
+
 function bindRange(id, getter, setter, fmt) {
   const el = document.getElementById(id);
   if (!el) return;
-  const valSpan = el.parentElement.querySelector('.val');
+  const valEl = el.parentElement.querySelector('.val');
+  if (valEl && valEl.tagName === 'INPUT') {
+    valEl.min = el.min;
+    valEl.max = el.max;
+    valEl.step = el.step;
+  }
   const update = () => {
     const v = getter();
     el.value = v;
-    if (valSpan) valSpan.textContent = fmt ? fmt(v) : v;
+    setValDisplay(valEl, fmt ? fmt(v) : v, v);
   };
   el.addEventListener('input', () => {
-    setter(+el.value);
-    if (valSpan) valSpan.textContent = fmt ? fmt(+el.value) : el.value;
+    const v = +el.value;
+    setter(v);
+    setValDisplay(valEl, fmt ? fmt(v) : el.value, v);
     saveConfig();
   });
+  if (valEl && valEl.tagName === 'INPUT') {
+    valEl.addEventListener('input', () => {
+      let v = +valEl.value;
+      if (Number.isNaN(v)) return;
+      const minV = +el.min, maxV = +el.max;
+      if (!Number.isNaN(minV)) v = Math.max(minV, v);
+      if (!Number.isNaN(maxV)) v = Math.min(maxV, v);
+      el.value = v;
+      setter(v);
+      saveConfig();
+    });
+  }
   update();
 }
 
@@ -520,19 +851,36 @@ function bindRange(id, getter, setter, fmt) {
 function bindRangeMs(id, getter, setter) {
   const el = document.getElementById(id);
   if (!el) return;
-  const valSpan = el.parentElement.querySelector('.val');
+  const valEl = el.parentElement.querySelector('.val');
   const fmt = (s) => s.toFixed(2) + 's';
+  if (valEl && valEl.tagName === 'INPUT') {
+    valEl.min = el.min;
+    valEl.max = el.max;
+    valEl.step = el.step;
+  }
   const update = () => {
     const s = getter() / 1000;
     el.value = s;
-    if (valSpan) valSpan.textContent = fmt(s);
+    setValDisplay(valEl, fmt(s), +s.toFixed(2));
   };
   el.addEventListener('input', () => {
     const s = +el.value;
     setter(s * 1000);
-    if (valSpan) valSpan.textContent = fmt(s);
+    setValDisplay(valEl, fmt(s), +s.toFixed(2));
     saveConfig();
   });
+  if (valEl && valEl.tagName === 'INPUT') {
+    valEl.addEventListener('input', () => {
+      let s = +valEl.value;
+      if (Number.isNaN(s)) return;
+      const minV = +el.min, maxV = +el.max;
+      if (!Number.isNaN(minV)) s = Math.max(minV, s);
+      if (!Number.isNaN(maxV)) s = Math.min(maxV, s);
+      el.value = s;
+      setter(s * 1000);
+      saveConfig();
+    });
+  }
   update();
 }
 
@@ -552,23 +900,23 @@ function bindCheckbox(id, getter, setter) {
 
 function bindAllControls() {
   bindRange('thr1', () => config.threshold1, v => config.threshold1 = v);
-  bindRange('thr2', () => config.threshold2, v => config.threshold2 = v);
-  bindRange('thr3', () => config.threshold3, v => config.threshold3 = v);
-  bindSelect('surpriseMode', () => config.surpriseMode, v => {
-    config.surpriseMode = v;
-    volSurprised = false; oneshotUntil = 0; oneshotCooldownUntil = 0;
-  });
-  bindSelect('surpriseStyle', () => config.surpriseStyle, v => config.surpriseStyle = v);
 
   // Non-time motion params (numbers, ratios, degrees, etc.)
   const motionPlain = [
     'breathAmpY','swayAmpX',
     'talkTiltMaxDeg','talkTiltLerp',
     'idleLookAmpX',
-    'loudPulseMin','loudPulseDelta','loudPulseScale',
-    'surpriseHopY',
+    'loudPulseMin','loudPulseScale',
     'yosomiTiltDeg',
     'sleepyBreathMul',
+    // Custom-expression animation params
+    'surpriseHopY',
+    'recoilFactor',
+    'shakeAmp',
+    'bounceAmp','bounceSpeed',
+    'wobbleAmp','wobbleSpeed','wobbleRot',
+    'nodAmp','nodSpeed','nodRot',
+    'headshakeAmp','headshakeSpeed','headshakeRot',
   ];
   for (const k of motionPlain) {
     bindRange('m_' + k, () => config.motion[k], v => config.motion[k] = v);
@@ -579,9 +927,9 @@ function bindAllControls() {
     'breathPeriod','swayPeriod',
     'talkTiltPeriod',
     'idleLookPeriod','idleLookDelay',
-    'surpriseHopDur',
     'yosomiIntervalMin','yosomiIntervalMax','yosomiDuration',
-    'sleepyAfter',
+    'sleepyAfter','fullAsleepAfter',
+    'surpriseHopDur',
   ];
   for (const k of motionTime) {
     bindRangeMs('m_' + k, () => config.motion[k], v => config.motion[k] = v);
@@ -591,6 +939,43 @@ function bindAllControls() {
   bindRangeMs('b_blinkMax', () => config.blinkMax, v => config.blinkMax = v);
   bindRangeMs('b_blinkDuration', () => config.blinkDuration, v => config.blinkDuration = v);
   bindCheckbox('obsMode', () => config.obsMode, v => config.obsMode = v);
+
+  // Background mode (transparent / checker / color)
+  const bgModeSel = document.getElementById('backgroundMode');
+  const bgColorInput = document.getElementById('backgroundColor');
+  const bgColorRow = document.getElementById('backgroundColorRow');
+  if (bgModeSel && bgColorInput && bgColorRow) {
+    bgModeSel.value = config.backgroundMode || 'transparent';
+    bgColorInput.value = config.backgroundColor || '#88c0d0';
+    const refreshBgUI = () => {
+      bgColorRow.style.display = (config.backgroundMode === 'color') ? '' : 'none';
+    };
+    applyBackground();
+    refreshBgUI();
+    bgModeSel.addEventListener('change', () => {
+      config.backgroundMode = bgModeSel.value;
+      saveConfig();
+      applyBackground();
+      refreshBgUI();
+    });
+    bgColorInput.addEventListener('input', () => {
+      config.backgroundColor = bgColorInput.value;
+      saveConfig();
+      if (config.backgroundMode === 'color') applyBackground();
+    });
+  }
+}
+
+function applyBackground() {
+  document.body.classList.remove('bg-checker');
+  if (config.backgroundMode === 'checker') {
+    document.body.style.backgroundColor = '';
+    document.body.classList.add('bg-checker');
+  } else if (config.backgroundMode === 'color') {
+    document.body.style.backgroundColor = config.backgroundColor || '#88c0d0';
+  } else {
+    document.body.style.backgroundColor = '';
+  }
 }
 
 // ============================================================
@@ -598,7 +983,7 @@ function bindAllControls() {
 // ============================================================
 panelToggle.addEventListener('click', () => panel.classList.toggle('hidden'));
 function applyPanelInitialState() {
-  if (FORCE_SURPRISED || FORCE_HIDE_PANEL || config.obsMode) {
+  if (forcedExpressionId || FORCE_HIDE_PANEL || config.obsMode) {
     panel.classList.add('hidden');
   }
 }
@@ -608,12 +993,6 @@ function applyPanelInitialState() {
 // ============================================================
 let currentVolume = 0;
 let blinking = false;
-let surprised = FORCE_SURPRISED;
-let volSurprised = false;
-let oneshotUntil = 0;
-let oneshotCooldownUntil = 0;
-const ONESHOT_HOLD_MS = 600;
-const ONESHOT_COOLDOWN_MS = 400;
 let lastTalkTime = 0;
 let tiltTarget = 0;
 let tiltCurrent = 0;
@@ -622,17 +1001,46 @@ let loudPulseUntil = 0;
 let loudArmed = true;
 let yosomiUntil = 0;
 let yosomiSide = 'left';
-let surpriseStartedAt = 0;
-let prevSurprised = false;
 let mouthChoiceIndex = 0;
 let mouthChoiceTier = -1;
+let mouthTierLastChangedAt = 0;
+const MOUTH_TIER_DOWNGRADE_HOLD_MS = 150; // prevent rapid drop-to-lower-tier flicker
+let lastRawLoudTime = 0; // last time the *raw* (un-smoothed) volume exceeded threshold1
+const QUICK_CLOSE_MS = 50; // if raw is silent for this long, force-close the mouth
+
+// Active expression state. May be set by keyboard (held) or by volume detection.
+let activeCustomExpressionId = null;
+let activeExpressionStartedAt = 0;     // for animations that need elapsed time
+let activeExpressionAnimation = null;  // cached animation name
+let keyboardHeldExpressionId = null;   // ID held down by keyboard
+const volumeOneshotStates = {};        // expressionId -> { until, cooldownUntil }
+const ONESHOT_HOLD_MS = 1000;
+const ONESHOT_COOLDOWN_MS = 400;
+
 
 function scheduleBlink() {
-  const sleepy = (performance.now() - lastTalkTime) > config.motion.sleepyAfter;
-  const base = sleepy ? config.blinkMin * 2 : config.blinkMin;
-  const span = sleepy ? config.blinkMax * 1.8 - base : config.blinkMax - config.blinkMin;
-  const next = base + Math.random() * Math.max(100, span);
-  const closeMs = sleepy ? config.blinkDuration * 1.8 : config.blinkDuration;
+  const m = config.motion;
+  const silentDur = performance.now() - lastTalkTime;
+
+  // Fully asleep: pickImageForState handles the locked-close image.
+  // We still poll periodically in case the user wakes up.
+  if (silentDur >= m.fullAsleepAfter) {
+    blinking = false;
+    setTimeout(scheduleBlink, 500);
+    return;
+  }
+
+  // Sleepy progress: 0 before sleepyAfter, 1 at fullAsleepAfter, linear between.
+  const range = Math.max(1, m.fullAsleepAfter - m.sleepyAfter);
+  const progress = silentDur < m.sleepyAfter ? 0 :
+                   Math.min(1, (silentDur - m.sleepyAfter) / range);
+
+  // As we get sleepier: blinks get longer (closure scales up) and intervals stretch.
+  const closeMs = config.blinkDuration * (1 + progress * 20);
+  const baseI   = config.blinkMin * (1 + progress * 1.5);
+  const maxI    = config.blinkMax * (1 + progress * 1.5);
+  const next    = baseI + Math.random() * Math.max(100, maxI - baseI);
+
   setTimeout(() => {
     blinking = true;
     setTimeout(() => {
@@ -658,13 +1066,26 @@ function triggerYosomi() {
   yosomiUntil = performance.now() + config.motion.yosomiDuration;
 }
 
+function setActiveExpression(id, now) {
+  if (id === activeCustomExpressionId) return; // unchanged
+  activeCustomExpressionId = id;
+  if (id) {
+    const exp = config.customExpressions.find(e => e.id === id);
+    activeExpressionAnimation = exp ? (exp.animation || 'none') : null;
+    activeExpressionStartedAt = now;
+  } else {
+    activeExpressionAnimation = null;
+  }
+}
+
 function scheduleYosomi() {
   const m = config.motion;
   const next = m.yosomiIntervalMin + Math.random() * Math.max(100, m.yosomiIntervalMax - m.yosomiIntervalMin);
   setTimeout(() => {
     const now = performance.now();
     const silentDur = now - lastTalkTime;
-    if (silentDur > m.idleLookDelay && !surprised && !volSurprised && !FORCE_SURPRISED) {
+    if (silentDur > m.idleLookDelay && silentDur < m.fullAsleepAfter &&
+        !activeCustomExpressionId && !forcedExpressionId) {
       triggerYosomi();
     }
     scheduleYosomi();
@@ -673,21 +1094,71 @@ function scheduleYosomi() {
 
 setInterval(() => {
   mouthChoiceIndex = Math.floor(Math.random() * 9973);
-}, 220);
+}, 350);
 
 // ============================================================
 // Keyboard
 // ============================================================
 document.addEventListener('keydown', (e) => {
-  if (e.code === 'Space' && !FORCE_SURPRISED) {
-    if (!surprised) surprised = true;
+  // Hotkey capture mode (for both surprise and custom expressions)
+  if (keyCaptureTarget) {
+    if (e.code === 'Escape') {
+      cancelKeyCapture();
+      e.preventDefault();
+      return;
+    }
+    if (RESERVED_KEYS_FOR_CUSTOM.has(e.code)) {
+      alert('このキー (' + keyCodeLabel(e.code) + ') は予約されています。別のキーを選んでください。');
+      return;
+    }
+    const isInputFocused = document.activeElement && document.activeElement.tagName === 'INPUT';
+    if (isInputFocused) return;
+
+    const exp = config.customExpressions.find(x => x.id === keyCaptureTarget);
+    if (exp) {
+      // Remove duplicates from other custom expressions
+      for (const other of config.customExpressions) {
+        if (other.id !== exp.id && other.hotkey === e.code) other.hotkey = null;
+      }
+      exp.hotkey = e.code;
+      saveConfig();
+    }
+    cancelKeyCapture();
+    buildCustomExpressions();
     e.preventDefault();
+    return;
   }
-  if (e.code === 'KeyH') panel.classList.toggle('hidden');
-  if (e.code === 'KeyY') triggerYosomi();
+
+  // Ignore keypresses while typing in input fields
+  if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'SELECT')) {
+    return;
+  }
+
+  // Ignore auto-repeat (we only care about the initial press / final release)
+  if (e.repeat) {
+    e.preventDefault();
+    return;
+  }
+
+  if (e.code === 'KeyH') { panel.classList.toggle('hidden'); return; }
+  if (e.code === 'KeyY') { triggerYosomi(); return; }
+
+  // Custom expression hotkeys — press-and-hold (includes the default びっくり)
+  for (const exp of config.customExpressions) {
+    if (exp.hotkey && exp.hotkey === e.code && urlOf(exp.imageKey)) {
+      keyboardHeldExpressionId = exp.id;
+      e.preventDefault();
+      return;
+    }
+  }
 });
 document.addEventListener('keyup', (e) => {
-  if (e.code === 'Space' && !FORCE_SURPRISED) surprised = false;
+  for (const exp of config.customExpressions) {
+    if (exp.hotkey && exp.hotkey === e.code && keyboardHeldExpressionId === exp.id) {
+      keyboardHeldExpressionId = null;
+      return;
+    }
+  }
 });
 
 // ============================================================
@@ -723,7 +1194,16 @@ async function startMic() {
       }
       const rms = Math.sqrt(sum / data.length);
       const raw = Math.min(100, rms * 250);
-      smoothed = smoothed * 0.5 + raw * 0.5;
+      // Track raw loud time for quick mouth-close detection.
+      if (raw > config.threshold1) lastRawLoudTime = performance.now();
+      // Asymmetric envelope used only for *tier selection* (which mouth shape).
+      // Smooth release keeps the tier stable through brief volume dips between
+      // syllables. Whether the mouth is open vs closed is decided by `raw`.
+      if (raw > smoothed) {
+        smoothed = smoothed * 0.5 + raw * 0.5;
+      } else {
+        smoothed = smoothed * 0.92 + raw * 0.08;
+      }
       currentVolume = smoothed;
       volText.textContent = currentVolume.toFixed(1);
       volBar.style.width = currentVolume + '%';
@@ -732,23 +1212,49 @@ async function startMic() {
       if (currentVolume > config.threshold1) lastTalkTime = now;
 
       const m = config.motion;
-      const loudThr = Math.max(config.threshold2 + m.loudPulseDelta, m.loudPulseMin);
+      const loudThr = m.loudPulseMin;
       if (currentVolume > loudThr && loudArmed && now > loudPulseUntil) {
         loudPulseUntil = now + m.loudPulseDur;
         loudArmed = false;
       }
-      if (currentVolume < config.threshold2 * m.loudPulseRearm) loudArmed = true;
+      if (currentVolume < loudThr * m.loudPulseRearm) loudArmed = true;
 
-      if (config.surpriseMode === 'hold') {
-        volSurprised = currentVolume > config.threshold3;
-      } else if (config.surpriseMode === 'oneshot') {
-        if (currentVolume > config.threshold3 && now > oneshotCooldownUntil && now > oneshotUntil) {
-          oneshotUntil = now + ONESHOT_HOLD_MS;
-          oneshotCooldownUntil = oneshotUntil + ONESHOT_COOLDOWN_MS;
+      // Per-expression volume trigger detection.
+      // The expression with the highest currently-active threshold wins.
+      let volumeWinnerId = null;
+      let volumeWinnerThreshold = -Infinity;
+      for (const exp of config.customExpressions) {
+        const mode = exp.volumeMode;
+        if (!mode || mode === 'off') continue;
+        const thr = exp.volumeThreshold;
+        if (typeof thr !== 'number') continue;
+        let active = false;
+        if (mode === 'hold') {
+          active = currentVolume > thr;
+        } else if (mode === 'oneshot') {
+          const st = volumeOneshotStates[exp.id] || { until: 0, cooldownUntil: 0 };
+          if (currentVolume > thr && now > st.cooldownUntil && now > st.until) {
+            st.until = now + ONESHOT_HOLD_MS;
+            st.cooldownUntil = st.until + ONESHOT_COOLDOWN_MS;
+            volumeOneshotStates[exp.id] = st;
+          }
+          active = now < st.until;
         }
-        volSurprised = now < oneshotUntil;
+        if (active && thr > volumeWinnerThreshold) {
+          volumeWinnerThreshold = thr;
+          volumeWinnerId = exp.id;
+        }
+      }
+
+      // Priority: URL-forced > keyboard > volume > none
+      if (forcedExpressionId) {
+        setActiveExpression(forcedExpressionId, now);
+      } else if (keyboardHeldExpressionId) {
+        setActiveExpression(keyboardHeldExpressionId, now);
+      } else if (volumeWinnerId) {
+        setActiveExpression(volumeWinnerId, now);
       } else {
-        volSurprised = false;
+        setActiveExpression(null, now);
       }
 
       requestAnimationFrame(tick);
@@ -763,39 +1269,76 @@ startMicBtn.addEventListener('click', startMic);
 // ============================================================
 // Image selection per frame
 // ============================================================
-function urlOf(key) {
-  return (key && imageCache[key]) || null;
+function urlOf(ref) {
+  if (!ref || typeof ref !== 'string') return null;
+  if (ref.startsWith('img_')) return imageCache[ref] || null;
+  return ref; // direct path / URL (for bundled samples or external URLs)
 }
 
 function pickMouthTierImage() {
-  let selectedTierIdx = -1;
+  // Find the tier with the highest threshold that is still <= currentVolume
+  // and that has at least one valid image. Order-independent.
+  let bestIdx = -1;
+  let bestThreshold = -Infinity;
   for (let i = 0; i < config.mouthTiers.length; i++) {
     const t = config.mouthTiers[i];
-    if (t.threshold <= currentVolume && t.images.some(k => imageCache[k])) {
-      selectedTierIdx = i;
+    if (t.threshold <= currentVolume &&
+        t.threshold > bestThreshold &&
+        t.images.some(k => urlOf(k))) {
+      bestThreshold = t.threshold;
+      bestIdx = i;
     }
   }
-  if (selectedTierIdx < 0) return null;
-  if (selectedTierIdx !== mouthChoiceTier) {
-    mouthChoiceTier = selectedTierIdx;
+  if (bestIdx < 0) return null;
+
+  // Hysteresis: only allow a drop to a lower tier if enough time has passed
+  // since the last change. Upgrades to a higher tier always take effect.
+  const now = performance.now();
+  if (mouthChoiceTier >= 0 && bestIdx < mouthChoiceTier) {
+    if (now - mouthTierLastChangedAt < MOUTH_TIER_DOWNGRADE_HOLD_MS) {
+      bestIdx = mouthChoiceTier;
+    }
+  }
+  if (bestIdx !== mouthChoiceTier) {
+    mouthChoiceTier = bestIdx;
+    mouthTierLastChangedAt = now;
     mouthChoiceIndex = Math.floor(Math.random() * 9973);
   }
-  const tier = config.mouthTiers[selectedTierIdx];
-  const validKeys = tier.images.filter(k => imageCache[k]);
+  const tier = config.mouthTiers[bestIdx];
+  const validKeys = tier.images.filter(k => urlOf(k));
   return validKeys[mouthChoiceIndex % validKeys.length] || null;
 }
 
 function pickImageForState(now) {
-  const isSurprised = surprised || volSurprised;
-  if (isSurprised) return urlOf(config.images.surprised) || urlOf(config.images.normal);
-  if (blinking)    return urlOf(config.images.close)     || urlOf(config.images.normal);
-  if (currentVolume < config.threshold1) {
+  // Highest priority: active custom expression (keyboard or volume-triggered)
+  if (activeCustomExpressionId) {
+    const exp = config.customExpressions.find(e => e.id === activeCustomExpressionId);
+    if (exp && exp.imageKey) {
+      const url = urlOf(exp.imageKey);
+      if (url) return url;
+    }
+  }
+  // Fully asleep: eyes stay closed
+  const silentDur = now - lastTalkTime;
+  if (silentDur >= config.motion.fullAsleepAfter) {
+    return urlOf(config.images.close) || urlOf(config.images.normal);
+  }
+  if (blinking) return urlOf(config.images.close) || urlOf(config.images.normal);
+
+  // Quick-close: if the *raw* audio has been silent for QUICK_CLOSE_MS, close
+  // the mouth immediately even if the smoothed envelope is still elevated.
+  // This avoids the mouth flicking through lower tiers as the envelope decays.
+  const rawSilentDur = now - lastRawLoudTime;
+  const effectivelyQuiet = rawSilentDur > QUICK_CLOSE_MS || currentVolume < config.threshold1;
+
+  if (effectivelyQuiet) {
     if (now < yosomiUntil) {
       const key = yosomiSide === 'right' ? config.images.yosomi_right : config.images.yosomi_left;
       return urlOf(key) || urlOf(config.images.normal);
     }
     return urlOf(config.images.normal);
   }
+
   const tierKey = pickMouthTierImage();
   if (tierKey) return urlOf(tierKey);
   return urlOf(config.images.normal);
@@ -805,9 +1348,53 @@ function pickImageForState(now) {
 // Render loop
 // ============================================================
 let lastSrc = '';
+function computeExpressionAnimation(now, animType, startedAt) {
+  let x = 0, y = 0, scale = 1, rot = 0;
+  const elapsed = now - startedAt;
+  const m = config.motion;
+  switch (animType) {
+    case 'hop': {
+      const t = Math.min(1, elapsed / m.surpriseHopDur);
+      const curve = Math.sin(t * Math.PI);
+      y = -curve * m.surpriseHopY;
+      scale = 1 + curve * 0.04;
+      if (elapsed > m.surpriseHopDur) rot = Math.sin(now / 35) * 0.8;
+      break;
+    }
+    case 'recoil': {
+      const t = Math.min(1, elapsed / m.surpriseHopDur);
+      const curve = Math.sin(t * Math.PI);
+      y = curve * m.surpriseHopY * m.recoilFactor;
+      scale = 1 - curve * 0.05;
+      if (elapsed > m.surpriseHopDur) rot = Math.sin(now / 35) * 0.8;
+      break;
+    }
+    case 'shake':
+      x = (Math.random() - 0.5) * m.shakeAmp;
+      y = (Math.random() - 0.5) * m.shakeAmp;
+      break;
+    case 'bounce':
+      y = -Math.abs(Math.sin(now / m.bounceSpeed)) * m.bounceAmp;
+      break;
+    case 'wobble':
+      x = Math.sin(now / m.wobbleSpeed) * m.wobbleAmp;
+      rot = Math.sin(now / m.wobbleSpeed) * m.wobbleRot;
+      break;
+    case 'nod':
+      y = Math.sin(now / m.nodSpeed) * m.nodAmp;
+      rot = Math.sin(now / m.nodSpeed) * m.nodRot;
+      break;
+    case 'headshake':
+      x = Math.sin(now / m.headshakeSpeed) * m.headshakeAmp;
+      rot = Math.sin(now / m.headshakeSpeed) * m.headshakeRot;
+      break;
+  }
+  return { x, y, scale, rot };
+}
+
 function render(now) {
   const m = config.motion;
-  const isSurprised = surprised || volSurprised;
+  const isExpressionActive = !!activeCustomExpressionId;
 
   const src = pickImageForState(now);
   if (src && src !== lastSrc) {
@@ -818,9 +1405,6 @@ function render(now) {
     lastSrc = '';
   }
 
-  if (isSurprised && !prevSurprised) surpriseStartedAt = now;
-  prevSurprised = isSurprised;
-
   const isTalking = currentVolume > config.threshold1;
   const silentDur = now - lastTalkTime;
   const isSleepy = silentDur > m.sleepyAfter;
@@ -829,7 +1413,10 @@ function render(now) {
   const breathY = Math.sin((now / m.breathPeriod) * Math.PI * 2) * m.breathAmpY * breathMul;
   const swayX = Math.sin((now / m.swayPeriod) * Math.PI * 2) * m.swayAmpX;
 
-  if (isTalking) {
+  // Tilt: suppress automated tilts during an active custom expression
+  if (isExpressionActive) {
+    tiltTarget = 0;
+  } else if (isTalking) {
     if (now > nextTiltChange) {
       tiltTarget = (Math.random() - 0.5) * 2 * m.talkTiltMaxDeg;
       nextTiltChange = now + m.talkTiltPeriod * (0.7 + Math.random() * 0.6);
@@ -841,8 +1428,9 @@ function render(now) {
   }
   tiltCurrent += (tiltTarget - tiltCurrent) * m.talkTiltLerp;
 
+  // Idle look: suppressed during expression active, talking, or fully asleep
   let idleLookX = 0;
-  if (!isTalking && silentDur > m.idleLookDelay) {
+  if (!isExpressionActive && !isTalking && silentDur > m.idleLookDelay && silentDur < m.fullAsleepAfter) {
     const fadeIn = Math.min(1, (silentDur - m.idleLookDelay) / m.idleLookFadeIn);
     idleLookX = Math.sin((now / m.idleLookPeriod) * Math.PI * 2) * m.idleLookAmpX * fadeIn;
   }
@@ -853,25 +1441,17 @@ function render(now) {
     loudScale = 1 + m.loudPulseScale * remain;
   }
 
-  let surpriseY = 0, surpriseScale = 1, surpriseRot = 0;
-  if (isSurprised) {
-    const elapsed = now - surpriseStartedAt;
-    const t = Math.min(1, elapsed / m.surpriseHopDur);
-    const curve = Math.sin(t * Math.PI);
-    if (config.surpriseStyle === 'recoil') {
-      surpriseY = curve * m.surpriseHopY * 0.35;
-      surpriseScale = 1 - curve * 0.05;
-    } else {
-      surpriseY = -curve * m.surpriseHopY;
-      surpriseScale = 1 + curve * 0.04;
-    }
-    if (elapsed > m.surpriseHopDur) surpriseRot = Math.sin(now / 35) * 0.8;
+  // Custom expression animation
+  let cx = 0, cy = 0, cScale = 1, cRot = 0;
+  if (isExpressionActive && activeExpressionAnimation && activeExpressionAnimation !== 'none') {
+    const a = computeExpressionAnimation(now, activeExpressionAnimation, activeExpressionStartedAt);
+    cx = a.x; cy = a.y; cScale = a.scale; cRot = a.rot;
   }
 
-  const tx = swayX + idleLookX;
-  const ty = breathY + surpriseY;
-  const finalScale = surpriseScale * loudScale;
-  const finalRot = surpriseRot + tiltCurrent;
+  const tx = swayX + idleLookX + cx;
+  const ty = breathY + cy;
+  const finalScale = cScale * loudScale;
+  const finalRot = cRot + tiltCurrent;
   avatar.style.transform =
     `translate(${tx.toFixed(2)}px, ${ty.toFixed(2)}px) ` +
     `scale(${finalScale.toFixed(3)}) ` +
@@ -894,12 +1474,21 @@ document.getElementById('resetDefaults').addEventListener('click', async () => {
 document.getElementById('exportConfig').addEventListener('click', () => {
   // Build a config copy where image-key references are replaced with dataURLs
   const exportConfig = cloneDeep(config);
-  const resolve = (k) => (k && imageCache[k]) ? imageCache[k] : null;
+  const resolve = (k) => {
+    if (!k || typeof k !== 'string') return null;
+    if (k.startsWith('img_')) return imageCache[k] || null;
+    return k; // preserve paths/URLs
+  };
   for (const slot of FIXED_SLOTS) {
     exportConfig.images[slot.key] = resolve(exportConfig.images[slot.key]);
   }
   for (const tier of exportConfig.mouthTiers) {
     tier.images = tier.images.map(resolve).filter(Boolean);
+  }
+  if (Array.isArray(exportConfig.customExpressions)) {
+    for (const exp of exportConfig.customExpressions) {
+      exp.imageKey = resolve(exp.imageKey);
+    }
   }
   const blob = new Blob([JSON.stringify(exportConfig, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
@@ -928,13 +1517,14 @@ document.getElementById('importFile').addEventListener('change', async (e) => {
       await idbClear();
       imageCache = {};
       const importOne = async (v) => {
-        if (typeof v === 'string' && v.startsWith('data:')) {
+        if (typeof v !== 'string' || !v) return null;
+        if (v.startsWith('data:')) {
           const k = newImageKey();
           await idbSet(k, v);
           imageCache[k] = v;
           return k;
         }
-        return null;
+        return v; // preserve relative paths or URLs as-is
       };
       for (const slot of FIXED_SLOTS) {
         next.images[slot.key] = await importOne(next.images[slot.key]);
@@ -949,6 +1539,14 @@ document.getElementById('importFile').addEventListener('change', async (e) => {
           }
           tier.images = newKeys;
         }
+      }
+      if (Array.isArray(next.customExpressions)) {
+        for (const exp of next.customExpressions) {
+          exp.imageKey = await importOne(exp.imageKey);
+          if (!exp.id) exp.id = newExpressionId();
+        }
+      } else {
+        next.customExpressions = [];
       }
       config = next;
       saveConfig();
@@ -974,7 +1572,27 @@ async function init() {
   // Migrate legacy dataURLs from localStorage config into IndexedDB
   await migrateLegacyDataURLs();
 
+  // Replace static `<span class="val">` displays next to range sliders with
+  // editable number inputs so users can type values precisely.
+  document.querySelectorAll('.row > input[type=range]').forEach((slider) => {
+    const span = slider.parentElement.querySelector('span.val');
+    if (!span) return;
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.className = 'val';
+    if (span.id) input.id = span.id;
+    input.value = span.textContent || slider.value;
+    span.parentNode.replaceChild(input, span);
+  });
+
+  // Resolve URL-forced expression now that customExpressions are loaded
+  if (FORCE_CUSTOM_HINT) {
+    const exp = resolveForcedExpression(FORCE_CUSTOM_HINT);
+    if (exp) forcedExpressionId = exp.id;
+  }
+
   buildFixedSlots();
+  buildCustomExpressions();
   buildMouthTiers();
   bindAllControls();
   applyPanelInitialState();

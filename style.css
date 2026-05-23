@@ -7,6 +7,17 @@ html, body {
   width: 100vw;
 }
 
+body.bg-checker {
+  background-color: #2a2a2a;
+  background-image:
+    linear-gradient(45deg, #555 25%, transparent 25%),
+    linear-gradient(-45deg, #555 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #555 75%),
+    linear-gradient(-45deg, transparent 75%, #555 75%);
+  background-size: 24px 24px;
+  background-position: 0 0, 0 12px, 12px -12px, 12px 0;
+}
+
 body {
   display: flex;
   align-items: center;
@@ -71,6 +82,54 @@ body {
   color: #fff;
 }
 
+#panel-status {
+  padding: 8px 14px;
+  background: rgba(0,0,0,0.18);
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+
+#panel-status button {
+  margin: 0;
+}
+
+.status-mic-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.status-mic-row #debug {
+  flex: 1;
+  margin-top: 0;
+  min-width: 0;
+}
+
+.status-meter-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-meter-row .status-label {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: #aaa;
+}
+
+.status-meter-row #volMeter {
+  flex: 1;
+  margin-top: 0;
+}
+
+.status-meter-row #volText {
+  flex: 0 0 36px;
+  text-align: right;
+  font-family: monospace;
+  color: #ddd;
+  font-size: 11px;
+}
+
 #panel-tabs {
   display: flex;
   border-bottom: 1px solid rgba(255,255,255,0.1);
@@ -122,6 +181,24 @@ body {
   line-height: 1.5;
 }
 
+.image-tips {
+  background: rgba(90, 170, 255, 0.08);
+  border: 1px solid rgba(90, 170, 255, 0.25);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+  color: #cce4ff;
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.image-tips strong { color: #fff; }
+
+.hint strong.warn {
+  color: #ffb84d;
+  font-weight: 700;
+}
+
 .hint code {
   background: rgba(255,255,255,0.08);
   padding: 1px 5px;
@@ -159,12 +236,45 @@ body {
   font-size: 11px;
 }
 
+/* Dropdown option styling (browser default is light-on-light otherwise) */
+#panel select option {
+  background: #1a1a1a;
+  color: #eee;
+}
+
 .row .val {
   flex: 0 0 50px;
   text-align: right;
   font-family: monospace;
   color: #ddd;
   font-size: 11px;
+}
+
+.row input[type=number].val {
+  flex: 0 0 60px;
+  background: rgba(255,255,255,0.08);
+  color: #eee;
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 3px;
+  padding: 2px 4px;
+  text-align: right;
+  font-family: monospace;
+  font-size: 11px;
+}
+
+.row input[type=number].val:focus {
+  outline: 1px solid #5af;
+  background: rgba(255,255,255,0.12);
+}
+
+.row input[type=color] {
+  flex: 0 0 60px;
+  height: 26px;
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 3px;
+  cursor: pointer;
+  padding: 2px;
 }
 
 /* Volume meter */
@@ -201,6 +311,94 @@ button:hover { background: rgba(255,255,255,0.16); }
 button.primary { background: rgba(90,170,255,0.25); border-color: rgba(90,170,255,0.5); }
 button.primary:hover { background: rgba(90,170,255,0.4); }
 button.danger { background: rgba(220,80,80,0.25); border-color: rgba(220,80,80,0.5); }
+
+/* Custom expression card */
+.expression-card {
+  background: rgba(255,255,255,0.04);
+  padding: 8px;
+  border-radius: 4px;
+  margin: 6px 0;
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.expression-card .thumb {
+  width: 48px;
+  height: 48px;
+  background: #222;
+  border-radius: 3px;
+  background-size: contain;
+  background-position: center;
+  background-repeat: no-repeat;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.expression-card .thumb.empty::before {
+  content: '+';
+  color: #666;
+  font-size: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+
+.expression-card .body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.expression-card .exp-label {
+  background: rgba(255,255,255,0.06);
+  color: #eee;
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 3px;
+  padding: 3px 6px;
+  font-size: 11px;
+}
+
+.expression-card .hotkey-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.expression-card .hotkey-btn {
+  min-width: 44px;
+  padding: 3px 8px;
+  font-family: monospace;
+  font-size: 11px;
+  margin: 0;
+}
+
+.expression-card .hotkey-btn.capturing {
+  background: #fbb;
+  color: #000;
+  border-color: #f88;
+}
+
+.expression-card .anim-select {
+  flex: 1;
+  min-width: 0;
+  background: rgba(255,255,255,0.06);
+  color: #eee;
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 3px;
+  padding: 2px 4px;
+  font-size: 11px;
+}
+
+.expression-card .remove-exp {
+  align-self: flex-start;
+  padding: 2px 8px;
+  font-size: 10px;
+  margin: 0;
+}
 
 /* Image slot */
 .image-slot {
@@ -271,18 +469,21 @@ button.danger { background: rgba(220,80,80,0.25); border-color: rgba(220,80,80,0
 .mouth-tier-header {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   margin-bottom: 6px;
+  flex-wrap: nowrap;
 }
 
 .mouth-tier-header label {
-  flex: 0 0 80px;
+  flex: 0 0 auto;
   font-size: 11px;
   color: #bbb;
+  white-space: nowrap;
 }
 
 .mouth-tier-header input[type=range] {
-  flex: 1;
+  flex: 1 1 0;
+  min-width: 40px;
 }
 
 .mouth-tier-header .val {
@@ -293,9 +494,24 @@ button.danger { background: rgba(220,80,80,0.25); border-color: rgba(220,80,80,0
   font-size: 11px;
 }
 
+.mouth-tier-header input[type=number].val {
+  flex: 0 0 44px;
+  background: rgba(255,255,255,0.08);
+  color: #eee;
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 3px;
+  padding: 1px 3px;
+  min-width: 0;
+}
+
+.mouth-tier-header input[type=number].val:focus {
+  outline: 1px solid #5af;
+  background: rgba(255,255,255,0.12);
+}
+
 .mouth-tier-header .remove-tier {
   flex: 0 0 auto;
-  padding: 2px 8px;
+  padding: 2px 6px;
   font-size: 10px;
 }
 
@@ -347,14 +563,15 @@ button.danger { background: rgba(220,80,80,0.25); border-color: rgba(220,80,80,0
 }
 
 #debug {
-  margin-top: 12px;
-  padding: 6px 8px;
-  background: #1a1a1a;
+  margin-top: 6px;
+  padding: 4px 6px;
+  background: rgba(0,0,0,0.4);
   color: #6f6;
-  font-size: 11px;
+  font-size: 10px;
   word-break: break-all;
-  border-radius: 4px;
+  border-radius: 3px;
   min-height: 14px;
+  line-height: 1.4;
 }
 
 #debug.error { color: #f66; }
