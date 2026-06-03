@@ -317,6 +317,10 @@ const URL_PARAMS = new URLSearchParams(location.search);
 // (or by label/id if no key match). Computed lazily after config loads.
 const FORCE_CUSTOM_HINT = URL_PARAMS.get('custom');
 const FORCE_HIDE_PANEL = URL_PARAMS.get('panel') === '0';
+// ?panel=1 forces the panel to stay visible regardless of config.obsMode.
+// Recovery escape hatch when the panel is hidden in an OBS Browser Source
+// where in-page keyboard input doesn't reach the page.
+const FORCE_SHOW_PANEL = URL_PARAMS.get('panel') === '1';
 let forcedExpressionId = null; // populated in init() once customExpressions known
 
 function hotkeyHintToCode(hint) {
@@ -1144,6 +1148,7 @@ function applyBackground() {
 // ============================================================
 panelToggle.addEventListener('click', () => panel.classList.toggle('hidden'));
 function applyPanelInitialState() {
+  if (FORCE_SHOW_PANEL) { panel.classList.remove('hidden'); return; }
   if (forcedExpressionId || FORCE_HIDE_PANEL || config.obsMode) {
     panel.classList.add('hidden');
   }
@@ -1494,7 +1499,7 @@ async function startMic() {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     micStarted = true;
     setDebug('マイク取得成功');
-    if (config.obsMode || FORCE_HIDE_PANEL) panel.classList.add('hidden');
+    if (!FORCE_SHOW_PANEL && (config.obsMode || FORCE_HIDE_PANEL)) panel.classList.add('hidden');
 
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
     const src = ctx.createMediaStreamSource(stream);
