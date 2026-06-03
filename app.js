@@ -1881,7 +1881,15 @@ document.getElementById('importFile').addEventListener('change', async (e) => {
         next.customExpressions = [];
       }
       config = next;
-      saveConfig();
+      // Bypass the debounced saveConfig — location.reload() below would cancel
+      // its pending setTimeout, losing the imported config in localStorage.
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
+      } catch (e) {
+        setDebug('localStorage 保存失敗: ' + e.message, true);
+        alert('設定の保存に失敗しました: ' + e.message);
+        return;
+      }
       location.reload();
     } catch (err) {
       alert('読み込み失敗: ' + err.message);
