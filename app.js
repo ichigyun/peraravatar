@@ -73,6 +73,11 @@ const FIXED_SLOTS = [
 //   - a relative path like "examples/sample_normal.png" (bundled defaults)
 //   - null (unset)
 // `urlOf(ref)` resolves either form to a URL usable as an <img src>.
+// Folder used when exporting JSON with "画像をパスで書き出し" enabled.
+// The user is expected to place the same image files (under their original
+// upload filenames) into this folder under the site root.
+const PATH_EXPORT_FOLDER = 'avatar/';
+
 const DEFAULT_CONFIG = {
   images: {
     normal:       'examples/sample_normal.png',
@@ -80,6 +85,9 @@ const DEFAULT_CONFIG = {
     yosomi_left:  'examples/sample_left.png',
     yosomi_right: 'examples/sample_right.png',
   },
+  // Tracks the original filename of each user-uploaded image, keyed by the
+  // IndexedDB image key (img_xxx). Used when exporting JSON in path mode.
+  imageNames: {},
   mouthTiers: [
     { threshold: 5,  images: ['examples/sample_mouth_o.png'] },
     { threshold: 18, images: ['examples/sample_mouth_i.png'] },
@@ -226,6 +234,7 @@ function loadConfigFromStorage() {
     const stored = JSON.parse(raw);
     config = { ...cloneDeep(DEFAULT_CONFIG), ...stored };
     config.images = { ...DEFAULT_CONFIG.images, ...(stored.images || {}) };
+    config.imageNames = { ...(stored.imageNames || {}) };
     config.motion = { ...DEFAULT_MOTION, ...(stored.motion || {}) };
     if (!Array.isArray(config.mouthTiers) || config.mouthTiers.length === 0) {
       config.mouthTiers = cloneDeep(DEFAULT_CONFIG.mouthTiers);
@@ -369,7 +378,7 @@ function pickImageFile() {
   });
 }
 
-async function storeNewImage(dataURL) {
+async function storeNewImage(dataURL, name) {
   const key = newImageKey();
   try {
     await idbSet(key, dataURL);
@@ -392,6 +401,10 @@ async function storeNewImage(dataURL) {
     throw e;
   }
   imageCache[key] = dataURL;
+  if (name && typeof name === 'string') {
+    if (!config.imageNames) config.imageNames = {};
+    config.imageNames[key] = name;
+  }
   return key;
 }
 
@@ -400,6 +413,7 @@ async function removeImageByKey(key) {
   if (!key.startsWith('img_')) return; // path-based reference, nothing to delete in IDB
   try { await idbDelete(key); } catch (e) { /* ignore */ }
   delete imageCache[key];
+  if (config.imageNames) delete config.imageNames[key];
 }
 
 // ============================================================
@@ -445,7 +459,7 @@ function buildFixedSlots() {
       const result = await pickImageFile();
       if (!result) return;
       const oldKey = config.images[slot.key];
-      const newKey = await storeNewImage(result.dataURL);
+      const newKey = await storeNewImage(result.dataURL, result.name);
       config.images[slot.key] = newKey;
       await removeImageByKey(oldKey);
       refreshThumb();
@@ -700,7 +714,7 @@ function buildCustomExpressions() {
       const result = await pickImageFile();
       if (!result) return;
       const oldKey = exp.imageKey;
-      const newKey = await storeNewImage(result.dataURL);
+      const newKey = await storeNewImage(result.dataURL, result.name);
       exp.imageKey = newKey;
       await removeImageByKey(oldKey);
       refreshThumb();
@@ -893,7 +907,7 @@ function buildMouthTiers() {
           const result = await pickImageFile();
           if (!result) return;
           const oldKey = tier.images[j];
-          const newKey = await storeNewImage(result.dataURL);
+          const newKey = await storeNewImage(result.dataURL, result.name);
           tier.images[j] = newKey;
           await removeImageByKey(oldKey);
           refreshImages();
@@ -908,7 +922,7 @@ function buildMouthTiers() {
       add.addEventListener('click', async () => {
         const result = await pickImageFile();
         if (!result) return;
-        const newKey = await storeNewImage(result.dataURL);
+        const newKey = await storeNewImage(result.dataURL, result.name);
         tier.images.push(newKey);
         refreshImages();
         saveConfig();
@@ -1807,14 +1821,25 @@ document.getElementById('resetDefaults').addEventListener('click', async () => {
   location.reload();
 });
 
-// Export: include image dataURLs inline so the JSON is fully portable
+// Export: include image dataURLs inline so the JSON is fully portable,
+// OR (when "画像をパスで書き出し" is checked) write `avatar/<filename>`
+// references instead, so users can swap image files in the avatar/ folder
+// without re-exporting.
 document.getElementById('exportConfig').addEventListener('click', () => {
-  // Build a config copy where image-key references are replaced with dataURLs
+  const exportAsPaths = !!document.getElementById('exportAsPaths')?.checked;
   const exportConfig = cloneDeep(config);
   const resolve = (k) => {
     if (!k || typeof k !== 'string') return null;
-    if (k.startsWith('img_')) return imageCache[k] || null;
-    return k; // preserve paths/URLs
+    if (k.startsWith('img_')) {
+      if (exportAsPaths) {
+        const name = config.imageNames && config.imageNames[k];
+        if (name) return PATH_EXPORT_FOLDER + name;
+        // No filename recorded (legacy upload) — fall back to dataURL so the
+        // export is never lossy.
+      }
+      return imageCache[k] || null;
+    }
+    return k; // preserve paths/URLs as-is
   };
   for (const slot of FIXED_SLOTS) {
     exportConfig.images[slot.key] = resolve(exportConfig.images[slot.key]);
@@ -1827,6 +1852,9 @@ document.getElementById('exportConfig').addEventListener('click', () => {
       exp.imageKey = resolve(exp.imageKey);
     }
   }
+  // imageNames is an instance-local mapping (img_xxx → filename). Importing
+  // it elsewhere would dangle, so always strip it from the export.
+  delete exportConfig.imageNames;
   const blob = new Blob([JSON.stringify(exportConfig, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');

@@ -161,6 +161,8 @@
       <button id="importConfig">JSONを読み込み</button>
       <input type="file" id="importFile" accept=".json" style="display:none">
       <p class="hint">設定は localStorage に自動保存されます。エクスポートは画像も含めて1つの JSON にまとめます（容量に注意）。</p>
+      <label><input type="checkbox" id="exportAsPaths"> 画像をパスで書き出し（上級者向け）</label>
+      <p class="hint">チェックすると JSON 内の画像参照を <code>avatar/&lt;元のファイル名&gt;</code> として書き出します。アップロード時と同じ名前の画像ファイルを <code>avatar/</code> フォルダ（リポジトリ直下）にあらかじめ置いておくと、JSON を再書き出しせずに画像差し替えが可能になります。元のファイル名が記録されていない画像（旧バージョンで登録したもの等）は dataURL にフォールバックします。</p>
 
       <h3>URL パラメータ</h3>
       <p class="hint">
