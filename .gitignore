@@ -18,6 +18,3 @@ package-lock.json
 
 # Local user data exports
 peraravatar-config*.json
-
-# Claude Code project-local settings (not for distribution)
-.claude/
